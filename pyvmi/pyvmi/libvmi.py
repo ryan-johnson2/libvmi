@@ -55,7 +55,7 @@ class Libvmi(object):
     # Memory translation
     #
     def translate_kv2p(self, vaddr):
-        pass
+        return lib.vmi_translate_kv2p(self.vmi[0], vaddr)
 
     def translate_uv2p(self, vaddr, pid):
         return lib.vmi_translate_uv2p(self.vmi[0], vaddr, pid)
@@ -64,7 +64,7 @@ class Libvmi(object):
         return lib.vmi_translate_ksym2v(self.vmi[0], symbol)
 
     def pid_to_dtb(self, pid):
-        pass
+        return lib.vmi_pid_to_dtb(self.vmi[0], pid)
 
     def pagetable_lookup(self, dtb, vaddr):
         pass
@@ -89,6 +89,9 @@ class Libvmi(object):
         if not lib.vmi_read_pa(self.vmi[0], paddr, data, count):
             raise LibvmiError()
         return ffi.buffer(data)
+
+    def zread_pa(self, paddr, count):
+        pass
 
     def read_8_ksym(self, sym):
         return struct.unpack('B', self.read_ksym(sym, 1))[0]
@@ -186,3 +189,23 @@ class Libvmi(object):
 
     def get_ostype(self):
         return lib.vmi_get_ostype(self.vmi[0])
+
+    # get vcpu reg
+    # get name
+    # get vmid
+    # get access mode
+    # get winver str
+    # get memsize
+    # print hex
+    # print hex pa
+    # print hex va
+    # print hex ksym
+    # pause vm
+    # resume vm
+    # v2pcache flush
+    # v2pcache add
+    # symcache flush
+    # symcache add
+    # pidcache flush
+    # pidcache add
+
