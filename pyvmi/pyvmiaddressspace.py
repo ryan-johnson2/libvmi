@@ -21,7 +21,7 @@ Copyright 2013 Bryan D. Payne
 """
 import volatility.addrspace as addrspace
 import urllib
-import pyvmi
+from pyvmi.libvmi import Libvmi, C
 
 
 class PyVmiAddressSpace(addrspace.BaseAddressSpace):
@@ -54,7 +54,9 @@ class PyVmiAddressSpace(addrspace.BaseAddressSpace):
         else:
             self.name = urllib.url2pathname(config.LOCATION[6:])
             self.config['name'] = self.name
-        self.vmi = pyvmi.init(self.config)
+
+        self.vmi = Libvmi().init(C.VMI_AUTO | C.VMI_INIT_PARTIAL,
+                                 self.config['name'])
         self.as_assert(not self.vmi is None, "VM not found")
         self.dtb = self.get_cr3()
 
@@ -90,13 +92,10 @@ class PyVmiAddressSpace(addrspace.BaseAddressSpace):
         return 4096 < addr < self.vmi.get_memsize() - 1
 
     def write(self, addr, data):
-        nbytes = self.vmi.write_pa(addr, data)
-        if nbytes != len(data):
-            return False
-        return True
+        return False
 
     def get_cr3(self):
-        cr3 = self.vmi.get_vcpureg("cr3", 0)
+        cr3 = self.vmi.get_vcpureg(C.CR3, 0)
         return cr3
 
     def get_available_addresses(self):
