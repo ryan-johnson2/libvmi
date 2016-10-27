@@ -118,7 +118,7 @@ typedef struct driver_interface {
         bool enabled);
     status_t (*set_mem_access_ptr)(
         vmi_instance_t,
-        mem_access_event_t*,
+        addr_t gpfn,
         vmi_mem_access_t,
         uint16_t vmm_pagetable_id);
     status_t (*start_single_step_ptr)(
@@ -138,6 +138,26 @@ typedef struct driver_interface {
     status_t (*set_debug_event_ptr)(
         vmi_instance_t,
         bool enabled);
+    status_t (*slat_get_domain_state_ptr)(
+        vmi_instance_t vmi,
+        bool *state);
+    status_t (*slat_set_domain_state_ptr)(
+        vmi_instance_t vmi,
+        bool state);
+    status_t (*slat_create_ptr)(
+        vmi_instance_t vmi,
+        uint16_t *view);
+    status_t (*slat_destroy_ptr)(
+        vmi_instance_t vmi,
+        uint16_t view);
+    status_t (*slat_switch_ptr)(
+        vmi_instance_t vmi,
+        uint16_t view);
+    status_t (*slat_change_gfn_ptr)(
+        vmi_instance_t vmi,
+        uint16_t slat_idx,
+        addr_t old_gfn,
+        addr_t new_gfn);
 
     /* Driver-specific data storage. */
     void* driver_data;

@@ -28,7 +28,6 @@
 #include "xen_events_abi.h"
 
 struct xen_instance;
-typedef struct xen_instance xen_instance_t;
 
 typedef struct {
     void *handle;
@@ -102,8 +101,30 @@ typedef struct {
     int (*xc_monitor_guest_request)
             (xc_interface *xch, domid_t domain_id, bool enable, bool sync);
 
+    int (*xc_altp2m_get_domain_state) 
+            (xc_interface *xch, domid_t domain_id, bool *state );
+
+    int (*xc_altp2m_set_domain_state)
+            (xc_interface *xch, domid_t domain_id, bool state );
+
+    int (*xc_altp2m_set_vcpu_enable_notify)
+            (xc_interface *xch, domid_t domain_id, uint32_t vcpuid, xen_pfn_t gfn );
+
+    int (*xc_altp2m_create_view)
+            (xc_interface *xch, domid_t domain_id, xenmem_access_t default_access, uint16_t *view_id );
+
+    int (*xc_altp2m_destroy_view) 
+            (xc_interface *xch, domid_t domain_id, uint16_t view_id );
+
+    int (*xc_altp2m_switch_to_view) 
+            (xc_interface *xch, domid_t domain_id, uint16_t view_id );
+
     int (*xc_altp2m_set_mem_access)
-        (xc_interface *handle, domid_t domid, uint16_t view_id, xen_pfn_t gfn, xenmem_access_t access);
+            (xc_interface *xch, domid_t domain_id, uint16_t view_id, xen_pfn_t gfn, xenmem_access_t access);
+
+    int (*xc_altp2m_change_gfn) 
+            (xc_interface *xch, domid_t domain_id, uint16_t view_id, xen_pfn_t old_gfn, xen_pfn_t new_gfn );
+
 
     /* Xen 4.8+ */
     int (*xc_monitor_debug_exceptions)
@@ -114,4 +135,4 @@ typedef struct {
 
 } libxc_wrapper_t;
 
-status_t create_libxc_wrapper(xen_instance_t *xen);
+status_t create_libxc_wrapper(struct xen_instance *xen);

@@ -63,9 +63,9 @@ vmi_read(
             start_addr = ctx->addr;
             break;
         case VMI_TM_KERNEL_SYMBOL:
-            if (!vmi->arch_interface || !vmi->os_interface) {
+            if (!vmi->arch_interface || !vmi->os_interface || !vmi->kpgd)
               return 0;
-            }
+
             dtb = vmi->kpgd;
             start_addr = vmi_translate_ksym2v(vmi, ctx->ksym);
             break;
@@ -190,7 +190,7 @@ vmi_read_X(
     vmi_instance_t vmi,
     const access_context_t *ctx,
     void *value,
-    int size)
+    size_t size)
 {
     size_t len_read = vmi_read(vmi, ctx, value, size);
 
@@ -287,6 +287,9 @@ vmi_read_str(
             addr = ctx->addr;
             break;
         case VMI_TM_KERNEL_SYMBOL:
+            if (!vmi->arch_interface || !vmi->os_interface || !vmi->kpgd)
+              return 0;
+
             dtb = vmi->kpgd;
             addr = vmi_translate_ksym2v(vmi, ctx->ksym);
             break;
@@ -370,7 +373,7 @@ vmi_read_X_pa(
     vmi_instance_t vmi,
     addr_t paddr,
     void *value,
-    int size)
+    size_t size)
 {
     size_t len_read = vmi_read_pa(vmi, paddr, value, size);
 
@@ -470,7 +473,7 @@ vmi_read_X_va(
     addr_t vaddr,
     vmi_pid_t pid,
     void *value,
-    int size)
+    size_t size)
 {
     size_t len_read = vmi_read_va(vmi, vaddr, pid, value, size);
 
@@ -587,7 +590,7 @@ vmi_read_X_ksym(
     vmi_instance_t vmi,
     char *sym,
     void *value,
-    int size)
+    size_t size)
 {
     size_t len_read = vmi_read_ksym(vmi, sym, value, size);
 

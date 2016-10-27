@@ -69,7 +69,7 @@ static inline xen_events_t *xen_get_events(vmi_instance_t vmi)
 }
 
 static
-int wait_for_event_or_timeout(xc_interface *xch, xc_evtchn *xce, unsigned long ms)
+int wait_for_event_or_timeout(xc_evtchn *xce, unsigned long ms)
 {
     struct pollfd fd = { .fd = xc_evtchn_fd(xce), .events = POLLIN | POLLERR };
     int port;
@@ -119,7 +119,7 @@ static inline int get_mem_event_42(xen_mem_event_t *mem_event, mem_event_42_requ
     req_cons = back_ring->req_cons;
 
     // Copy request
-    memcpy(req, RING_GET_REQUEST(back_ring, req_cons), sizeof(*req));
+    memcpy(req, RING_GET_REQUEST(back_ring, req_cons), sizeof(mem_event_42_request_t));
     req_cons++;
 
     // Update ring
@@ -138,7 +138,7 @@ static inline int put_mem_response_42(xen_mem_event_t *mem_event, mem_event_42_r
     rsp_prod = back_ring->rsp_prod_pvt;
 
     // Copy response
-    memcpy(RING_GET_RESPONSE(back_ring, rsp_prod), rsp, sizeof(*rsp));
+    memcpy(RING_GET_RESPONSE(back_ring, rsp_prod), rsp, sizeof(mem_event_42_response_t));
     rsp_prod++;
 
     // Update ring
@@ -157,7 +157,7 @@ static inline void get_mem_event_45(xen_mem_event_t *mem_event, mem_event_45_req
     req_cons = back_ring->req_cons;
 
     // Copy request
-    memcpy(req, RING_GET_REQUEST(back_ring, req_cons), sizeof(*req));
+    memcpy(req, RING_GET_REQUEST(back_ring, req_cons), sizeof(mem_event_45_request_t));
     req_cons++;
 
     // Update ring
@@ -174,7 +174,7 @@ static inline int put_mem_response_45(xen_mem_event_t *mem_event, mem_event_45_r
     rsp_prod = back_ring->rsp_prod_pvt;
 
     // Copy response
-    memcpy(RING_GET_RESPONSE(back_ring, rsp_prod), rsp, sizeof(*rsp));
+    memcpy(RING_GET_RESPONSE(back_ring, rsp_prod), rsp, sizeof(mem_event_45_response_t));
     rsp_prod++;
 
     // Update ring
@@ -218,9 +218,9 @@ static inline void process_response ( event_response_t response, uint32_t *rsp_f
     if ( !rsp_flags )
         return;
 
-    if ( response & (1u << VMI_EVENT_RESPONSE_EMULATE) )
+    if ( response & VMI_EVENT_RESPONSE_EMULATE )
         *rsp_flags |= MEM_EVENT_FLAG_EMULATE;
-    if ( response & (1u << VMI_EVENT_RESPONSE_EMULATE_NOWRITE) )
+    if ( response & VMI_EVENT_RESPONSE_EMULATE_NOWRITE )
         *rsp_flags |= MEM_EVENT_FLAG_EMULATE_NOWRITE;
 }
 
@@ -232,7 +232,8 @@ status_t process_interrupt_event(vmi_instance_t vmi, interrupts_t intr,
 
     int rc                      = -1;
     status_t status             = VMI_FAILURE;
-    vmi_event_t * event         = g_hash_table_lookup(vmi->interrupt_events, &intr);
+    gint lookup                 = intr;
+    vmi_event_t * event         = g_hash_table_lookup(vmi->interrupt_events, &lookup);
     xc_interface * xch          = xen_get_xchandle(vmi);
     unsigned long domain_id     = xen_get_domainid(vmi);
     xen_instance_t *xen         = xen_get_instance(vmi);
@@ -260,7 +261,9 @@ status_t process_interrupt_event(vmi_instance_t vmi, interrupts_t intr,
          *  ..but this basic structure should be adequate for now.
          */
 
+        vmi->event_callback = 1;
         process_response ( event->callback(vmi, event), rsp_flags );
+        vmi->event_callback = 0;
 
         if(-1 == event->interrupt_event.reinject) {
             errprint("%s Need to specify reinjection behaviour!\n", __FUNCTION__);
@@ -351,8 +354,8 @@ status_t process_register(vmi_instance_t vmi,
                           registers_t reg, uint64_t gfn, uint32_t vcpu_id, uint64_t gla,
                           uint32_t *rsp_flags)
 {
-
-    vmi_event_t * event = g_hash_table_lookup(vmi->reg_events, &reg);
+    gint lookup         = reg;
+    vmi_event_t * event = g_hash_table_lookup(vmi->reg_events, &lookup);
     xen_instance_t *xen = xen_get_instance(vmi);
 
     if(event) {
@@ -384,7 +387,9 @@ status_t process_register(vmi_instance_t vmi,
              *   so we have no req.flags equivalent. might need to add
              *   e.g !!(req.flags & MEM_EVENT_FLAG_VCPU_PAUSED)  would be nice
              */
+            vmi->event_callback = 1;
             process_response ( event->callback(vmi, event), rsp_flags );
+            vmi->event_callback = 0;
 
             return VMI_SUCCESS;
     }
@@ -412,20 +417,47 @@ status_t process_mem(vmi_instance_t vmi, bool access_r, bool access_w, bool acce
         return VMI_FAILURE;
     }
 
-    vmi_event_t *event = g_hash_table_lookup(vmi->mem_events, &gfn);
+    vmi_event_t *event;
     vmi_mem_access_t out_access = VMI_MEMACCESS_INVALID;
     if(access_r) out_access |= VMI_MEMACCESS_R;
     if(access_w) out_access |= VMI_MEMACCESS_W;
     if(access_x) out_access |= VMI_MEMACCESS_X;
 
-    if (event && event->mem_event.in_access & out_access) {
-        event->mem_event.gla = gla;
-        event->mem_event.gfn = gfn;
-        event->mem_event.offset = offset;
-        event->mem_event.out_access = out_access;
-        event->vcpu_id = vcpu_id;
-        process_response ( event->callback(vmi, event), rsp_flags );
-        return VMI_SUCCESS;
+    if ( g_hash_table_size(vmi->mem_events_on_gfn) ) {
+        event = g_hash_table_lookup(vmi->mem_events_on_gfn, &gfn);
+
+        if (event && event->mem_event.in_access & out_access) {
+            event->mem_event.gla = gla;
+            event->mem_event.gfn = gfn;
+            event->mem_event.offset = offset;
+            event->mem_event.out_access = out_access;
+            event->vcpu_id = vcpu_id;
+            process_response ( event->callback(vmi, event), rsp_flags );
+            return VMI_SUCCESS;
+        }
+    }
+
+    if ( g_hash_table_size(vmi->mem_events_generic) ) {
+        GHashTableIter i;
+        vmi_mem_access_t *key = NULL;
+        bool cb_issued = 0;
+
+        ghashtable_foreach(vmi->mem_events_generic, i, &key, &event) {
+            if ( event->mem_event.in_access & out_access ) {
+                event->mem_event.gla = gla;
+                event->mem_event.gfn = gfn;
+                event->mem_event.offset = offset;
+                event->mem_event.out_access = out_access;
+                event->vcpu_id = vcpu_id;
+                vmi->event_callback = 1;
+                process_response ( event->callback(vmi, event), rsp_flags );
+                vmi->event_callback = 0;
+                cb_issued = 1;
+            }
+        }
+
+        if ( cb_issued )
+            return VMI_SUCCESS;
     }
 
     /*
@@ -465,7 +497,10 @@ status_t process_single_step_event(vmi_instance_t vmi, uint64_t gfn, uint64_t gl
         event->ss_event.gfn = gfn;
         event->vcpu_id = vcpu_id;
 
+        vmi->event_callback = 1;
         process_response ( event->callback(vmi, event), rsp_flags );
+        vmi->event_callback = 0;
+
         return VMI_SUCCESS;
     }
 
@@ -859,8 +894,8 @@ status_t xen_set_reg_access_legacy(vmi_instance_t vmi, reg_event_t *event)
 }
 
 status_t
-xen_set_mem_access_legacy(vmi_instance_t vmi, mem_access_event_t *event,
-                          vmi_mem_access_t page_access_flag, uint16_t vmm_pagetable_id)
+xen_set_mem_access_legacy(vmi_instance_t vmi, addr_t gpfn,
+                          vmi_mem_access_t page_access_flag, uint16_t UNUSED(vmm_pagetable_id))
 {
     int rc;
     xc_interface * xch = xen_get_xchandle(vmi);
@@ -880,29 +915,6 @@ xen_set_mem_access_legacy(vmi_instance_t vmi, mem_access_event_t *event,
         errprint("%s error: invalid domid\n", __FUNCTION__);
         return VMI_FAILURE;
     }
-    if ( page_access_flag >= __VMI_MEMACCESS_MAX || page_access_flag <= VMI_MEMACCESS_INVALID ) {
-        errprint("%s error: invalid memaccess setting requested\n", __FUNCTION__);
-        return VMI_FAILURE;
-    }
-
-    /*
-     * Setting a page write-only or write-execute in EPT triggers and EPT misconfiguration error
-     * which is unhandled by Xen (at least up to 4.3) and instantly crashes the domain on the first trigger.
-     *
-     * See Intel® 64 and IA-32 Architectures Software Developer’s Manual
-     * 8.2.3.1 EPT Misconfigurations
-     * AN EPT misconfiguration occurs if any of the following is identified while translating a guest-physical address:
-     * * The value of bits 2:0 of an EPT paging-structure entry is either 010b (write-only) or 110b (write/execute).
-     */
-    if(page_access_flag == VMI_MEMACCESS_R || page_access_flag == VMI_MEMACCESS_RX) {
-        errprint("%s error: can't set requested memory access, unsupported by EPT.\n", __FUNCTION__);
-        return VMI_FAILURE;
-    }
-
-    addr_t page_key = event->physical_address >> 12;
-
-    uint64_t npages = page_key + event->npages > xe->mem_event.max_pages
-        ? xe->mem_event.max_pages - page_key: event->npages;
 
     /*
      * Convert betwen vmi_mem_access_t and mem_access_t
@@ -910,49 +922,27 @@ xen_set_mem_access_legacy(vmi_instance_t vmi, mem_access_event_t *event,
      * uses the required restriction.
      */
     if (xen->major_version == 4 && xen->minor_version < 5 ) {
-        /* Type is hvmmem_access_t in 4.2-4.4 */
-        static const hvmmem_access_t memaccess_conversion[] = {
-            [VMI_MEMACCESS_RWX] = HVMMEM_access_n,
-            [VMI_MEMACCESS_WX] = HVMMEM_access_r,
-            [VMI_MEMACCESS_RX] = HVMMEM_access_w,
-            [VMI_MEMACCESS_X] = HVMMEM_access_rw,
-            [VMI_MEMACCESS_W] = HVMMEM_access_rx,
-            [VMI_MEMACCESS_R] = HVMMEM_access_wx,
-            [VMI_MEMACCESS_N] = HVMMEM_access_rwx,
-            [VMI_MEMACCESS_W2X] = HVMMEM_access_rx2rw,
-            [VMI_MEMACCESS_RWX2N] = HVMMEM_access_n2rwx,
-        };
+        hvmmem_access_t access;
+        if ( VMI_FAILURE == convert_vmi_flags_to_hvmmem(page_access_flag, &access) )
+            return VMI_FAILURE;
 
-        hvmmem_access_t access = memaccess_conversion[page_access_flag];
-
-        rc = xen->libxcw.xc_hvm_set_mem_access(xch, dom, access, page_key, npages);
+        rc = xen->libxcw.xc_hvm_set_mem_access(xch, dom, access, gpfn, 1); // 1 page at a time
     } else {
-        /* Type is xenmem_access_t in 4.5+ */
-        static const xenmem_access_t memaccess_conversion[] = {
-            [VMI_MEMACCESS_RWX] = XENMEM_access_n,
-            [VMI_MEMACCESS_WX] = XENMEM_access_r,
-            [VMI_MEMACCESS_RX] = XENMEM_access_w,
-            [VMI_MEMACCESS_X] = XENMEM_access_rw,
-            [VMI_MEMACCESS_W] = XENMEM_access_rx,
-            [VMI_MEMACCESS_R] = XENMEM_access_wx,
-            [VMI_MEMACCESS_N] = XENMEM_access_rwx,
-            [VMI_MEMACCESS_W2X] = XENMEM_access_rx2rw,
-            [VMI_MEMACCESS_RWX2N] = XENMEM_access_n2rwx,
-        };
+        xenmem_access_t access;
+        if ( VMI_FAILURE == convert_vmi_flags_to_xenmem(page_access_flag, &access) )
+            return VMI_FAILURE;
 
-        xenmem_access_t access = memaccess_conversion[page_access_flag];
-
-        rc = xen->libxcw.xc_set_mem_access(xch, dom, access, page_key, npages);
+        rc = xen->libxcw.xc_set_mem_access(xch, dom, access, gpfn, 1); // 1 page at a time
     }
 
-    dbprint(VMI_DEBUG_XEN, "--Setting memaccess for domain %lu on physical address: %"PRIu64" npages: %"PRIu64"\n",
-            dom, event->physical_address, npages);
+    dbprint(VMI_DEBUG_XEN, "--Setting memaccess for domain %lu on GPFN: %"PRIu64"\n",
+            dom, gpfn);
 
     if(rc) {
         errprint("xc_hvm_set_mem_access failed with code: %d\n", rc);
         return VMI_FAILURE;
     }
-    dbprint(VMI_DEBUG_XEN, "--Done Setting memaccess on physical address: %"PRIu64"\n", event->physical_address);
+    dbprint(VMI_DEBUG_XEN, "--Done Setting memaccess on GPFN: %"PRIu64"\n", gpfn);
     return VMI_SUCCESS;
 }
 
@@ -1033,7 +1023,6 @@ status_t xen_start_single_step_legacy(vmi_instance_t vmi, single_step_event_t *e
 
 status_t xen_stop_single_step_legacy(vmi_instance_t vmi, uint32_t vcpu)
 {
-    unsigned long dom = xen_get_domainid(vmi);
     status_t ret = VMI_FAILURE;
 
     dbprint(VMI_DEBUG_XEN, "--Removing MTF flag from vcpu %u\n", vcpu);
@@ -1136,7 +1125,7 @@ status_t xen_events_listen_42(vmi_instance_t vmi, uint32_t timeout)
 
     if(!vmi->shutting_down && timeout > 0) {
         dbprint(VMI_DEBUG_XEN, "--Waiting for xen events...(%"PRIu32" ms)\n", timeout);
-        rc = wait_for_event_or_timeout(xch, xe->mem_event.xce_handle, timeout);
+        rc = wait_for_event_or_timeout(xe->mem_event.xce_handle, timeout);
         if ( rc < -1 ) {
             errprint("Error while waiting for event.\n");
             return VMI_FAILURE;
@@ -1368,7 +1357,7 @@ status_t xen_events_listen_45(vmi_instance_t vmi, uint32_t timeout)
 
     if(!vmi->shutting_down && timeout > 0) {
         dbprint(VMI_DEBUG_XEN, "--Waiting for xen events...(%"PRIu32" ms)\n", timeout);
-        rc = wait_for_event_or_timeout(xch, xe->mem_event.xce_handle, timeout);
+        rc = wait_for_event_or_timeout(xe->mem_event.xce_handle, timeout);
         if ( rc < -1 ) {
             errprint("Error while waiting for event.\n");
             return VMI_FAILURE;
@@ -1384,19 +1373,11 @@ status_t xen_events_listen_45(vmi_instance_t vmi, uint32_t timeout)
      * and process all reamining events on the ring. Once no more requests
      * are on the ring we can remove the events.
      */
-    if ( g_hash_table_size(vmi->clear_events) ) {
+    if ( vmi->clear_events && g_hash_table_size(vmi->clear_events) ) {
         vmi_pause_vm(vmi); // Pause all vCPUs
         vrc = process_requests_45(vmi, &req, &rsp);
 
-        GHashTableIter i;
-        vmi_event_t **key = NULL;
-        vmi_event_free_t cb;
-
-        ghashtable_foreach(vmi->clear_events, i, &key, &cb)
-            vmi_clear_event(vmi, *key, cb);
-
-        g_hash_table_destroy(vmi->clear_events);
-        vmi->clear_events = g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
+        g_hash_table_foreach_steal(vmi->clear_events, clear_events, vmi);
 
         vmi_resume_vm(vmi);
     }

@@ -2,6 +2,7 @@ SUBDIRS = config
 
 h_public =  libvmi.h \
             libvmi_extra.h \
+            slat.h \
             x86.h
 
 h_private = \
@@ -21,13 +22,13 @@ h_private = \
 
 c_sources = \
     accessors.c \
-    cache.c \
     convenience.c \
     core.c \
     events.c \
     performance.c \
     pretty_print.c \
     read.c \
+    slat.c \
     strmatch.c \
     write.c \
     memory.c \
@@ -39,6 +40,10 @@ c_sources = \
     driver/driver_interface.c \
     driver/memory_cache.c \
     os/os_interface.c
+
+if ENABLE_ADDRESS_CACHE
+c_sources  += cache.c
+endif
 
 if REKALL_PROFILES
 c_sources  += rekall.c
@@ -66,7 +71,9 @@ endif
 
 if HAVE_XEN
 h_public    += events.h
-drivers     += driver/xen/xen.h \
+drivers     += driver/xen/altp2m.c \
+               driver/xen/altp2m_private.h \
+               driver/xen/xen.h \
                driver/xen/xen_private.h \
                driver/xen/xen.c \
                driver/xen/xen_events.h \
@@ -104,4 +111,6 @@ lib_LTLIBRARIES= libvmi.la
 libvmi_la_SOURCES= $(h_public) $(h_private) $(drivers) $(os) $(c_sources)
 libvmi_la_LIBADD= config/libconfig.la
 libvmi_la_CFLAGS= -fvisibility=hidden $(GLIB_CFLAGS)
+libvmi_la_CFLAGS+= -Werror -Wall -Wextra
+libvmi_la_CFLAGS+= -Wno-missing-field-initializers -Wno-unused-but-set-variable
 libvmi_la_LDFLAGS= -release $(RELEASE) $(GLIB_LIBS)

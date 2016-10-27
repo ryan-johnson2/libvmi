@@ -67,9 +67,7 @@ xen_events_t *xen_get_events(vmi_instance_t vmi)
 }
 
 static
-int wait_for_event_or_timeout(xc_interface *xch,
-                              xc_evtchn *xce,
-                              unsigned long ms)
+int wait_for_event_or_timeout(xc_evtchn *xce, unsigned long ms)
 {
     struct pollfd fd = {
             .fd = xc_evtchn_fd(xce),
@@ -182,16 +180,16 @@ void process_response ( event_response_t response, vmi_event_t* event, vm_event_
     if ( response && event ) {
         uint32_t i = VMI_EVENT_RESPONSE_NONE+1;
 
-        for (;i<__VMI_EVENT_RESPONSE_MAX;i++)
+        for (;i<=__VMI_EVENT_RESPONSE_MAX;i++)
         {
-            uint32_t bit_set = !!(response & (1u << i));
+            event_response_t er = 1u << i;
 
-            if ( bit_set && event_response_conversion[i] != ~0 )
+            if ( response & er )
             {
-                switch ( i )
+                switch ( er )
                 {
                 case VMI_EVENT_RESPONSE_VMM_PAGETABLE_ID:
-                    rsp->altp2m_idx = event->vmm_pagetable_id;
+                    rsp->altp2m_idx = event->slat_id;
                     break;
                 case VMI_EVENT_RESPONSE_SET_EMUL_READ_DATA:
                     if ( event->emul_data ) {
@@ -211,11 +209,11 @@ void process_response ( event_response_t response, vmi_event_t* event, vm_event_
                     }
                     break;
                 case VMI_EVENT_RESPONSE_SET_REGISTERS:
-                    memcpy(&rsp->data.regs.x86, event->regs.x86, sizeof(struct regs_x86));
+                    memcpy(&rsp->data.regs.x86, event->x86_regs, sizeof(struct regs_x86));
                     break;
                 };
 
-                rsp->flags |= event_response_conversion[i];
+                rsp->flags |= event_response_conversion[er];
             }
         }
     }
@@ -228,8 +226,9 @@ status_t process_interrupt_event(vmi_instance_t vmi,
                                  vm_event_46_request_t *rsp)
 {
     int rc              = -1;
+    gint lookup         = intr;
     status_t status     = VMI_FAILURE;
-    vmi_event_t * event = g_hash_table_lookup(vmi->interrupt_events, &intr);
+    vmi_event_t * event = g_hash_table_lookup(vmi->interrupt_events, &lookup);
     xc_interface * xch  = xen_get_xchandle(vmi);
     domid_t domain_id   = xen_get_domainid(vmi);
 
@@ -254,7 +253,7 @@ status_t process_interrupt_event(vmi_instance_t vmi,
         if ( req->version >= 2 )
             event->interrupt_event.insn_length = req->u.software_breakpoint.insn_length;
 
-        event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
+        event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
         event->vcpu_id = req->vcpu_id;
 
         /* Will need to refactor if another interrupt is accessible
@@ -353,7 +352,8 @@ status_t process_register(vmi_instance_t vmi,
                           vm_event_46_request_t *req,
                           vm_event_46_request_t *rsp)
 {
-    vmi_event_t * event = g_hash_table_lookup(vmi->reg_events, &reg);
+    gint lookup = reg;
+    vmi_event_t * event = g_hash_table_lookup(vmi->reg_events, &lookup);
 
     if ( event )
     {
@@ -378,10 +378,12 @@ status_t process_register(vmi_instance_t vmi,
                 event->reg_event.value = req->u.write_ctrlreg.new_value;
                 event->reg_event.previous = req->u.write_ctrlreg.old_value;
                 break;
+            default:
+                break;
         }
 
         event->vcpu_id = req->vcpu_id;
-        event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
+        event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
 
         vmi->event_callback = 1;
         process_response ( event->callback(vmi, event), event, rsp );
@@ -415,6 +417,7 @@ status_t process_mem(vmi_instance_t vmi,
 
     xc_interface * xch = xen_get_xchandle(vmi);
     domid_t dom = xen_get_domainid(vmi);
+    vmi_event_t *event;
 
     if ( !xch ) {
         errprint("%s error: invalid xc_interface handle\n", __FUNCTION__);
@@ -431,26 +434,46 @@ status_t process_mem(vmi_instance_t vmi,
     if(req->u.mem_access.flags & MEM_ACCESS_W) out_access |= VMI_MEMACCESS_W;
     if(req->u.mem_access.flags & MEM_ACCESS_X) out_access |= VMI_MEMACCESS_X;
 
-    vmi_event_t *event = g_hash_table_lookup(vmi->mem_events, &req->u.mem_access.gfn);
-
-    if (event && (event->mem_event.in_access & out_access) )
-    {
-        event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
-        event->vmm_pagetable_id = (req->flags & VM_EVENT_FLAG_ALTERNATE_P2M) ? req->altp2m_idx : 0;
-        vmi->event_callback = 1;
-        process_response( issue_mem_cb(vmi, event, req, out_access), event, rsp );
-        vmi->event_callback = 0;
-        return VMI_SUCCESS;
+    if ( g_hash_table_size(vmi->mem_events_on_gfn) ) {
+        event = g_hash_table_lookup(vmi->mem_events_on_gfn, &req->u.mem_access.gfn);
+        if (event && (event->mem_event.in_access & out_access) )
+        {
+            event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
+            event->slat_id = (req->flags & VM_EVENT_FLAG_ALTERNATE_P2M) ? req->altp2m_idx : 0;
+            vmi->event_callback = 1;
+            process_response( issue_mem_cb(vmi, event, req, out_access), event, rsp );
+            vmi->event_callback = 0;
+            return VMI_SUCCESS;
+        }
     }
 
-errdone:
+    if ( g_hash_table_size(vmi->mem_events_generic) ) {
+        GHashTableIter i;
+        vmi_mem_access_t *key = NULL;
+        bool cb_issued = 0;
+
+        ghashtable_foreach(vmi->mem_events_generic, i, &key, &event) {
+            if ( (*key) & out_access ) {
+                event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
+                event->slat_id = (req->flags & VM_EVENT_FLAG_ALTERNATE_P2M) ? req->altp2m_idx : 0;
+                vmi->event_callback = 1;
+                process_response( issue_mem_cb(vmi, event, req, out_access), event, rsp );
+                vmi->event_callback = 0;
+                cb_issued = 1;
+            }
+        }
+
+        if ( cb_issued )
+            return VMI_SUCCESS;
+    }
+
     /*
      * TODO: Could this happen when using multi-vCPU VMs where multiple vCPU's trigger
      *       the same violation and the event is already being passed to vmi_step_event?
      *       The event in that case would be already removed from the GHashTable so
      *       the second violation on the other vCPU would not get delivered..
      */
-    errprint("Caught a memory event that had no handler registered in LibVMI @ GFN 0x%"PRIx32" (0x%"PRIx64"), access: %u\n",
+    errprint("Caught a memory event that had no handler registered in LibVMI @ GFN 0x%" PRIx64 " (0x%" PRIx64 "), access: %u\n",
              req->u.mem_access.gfn, (req->u.mem_access.gfn<<12) + req->u.mem_access.offset, out_access);
     return VMI_FAILURE;
 }
@@ -473,14 +496,15 @@ status_t process_single_step_event(vmi_instance_t vmi,
         return VMI_FAILURE;
     }
 
-    vmi_event_t * event = g_hash_table_lookup(vmi->ss_events, &req->vcpu_id);
+    gint lookup = req->vcpu_id;
+    vmi_event_t * event = g_hash_table_lookup(vmi->ss_events, &lookup);
 
     if (event)
     {
         event->ss_event.gfn = req->u.singlestep.gfn;
         event->ss_event.offset = req->data.regs.x86.rip & VMI_BIT_MASK(0,11);
         event->ss_event.gla = req->data.regs.x86.rip;
-        event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
+        event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
         event->vcpu_id = req->vcpu_id;
 
         vmi->event_callback = 1;
@@ -506,7 +530,7 @@ status_t process_guest_requested_event(vmi_instance_t vmi,
         errprint("%s error: invalid xc_interface handle\n", __FUNCTION__);
         return VMI_FAILURE;
     }
-    if ( dom == VMI_INVALID_DOMID )
+    if ( dom == (domid_t)VMI_INVALID_DOMID )
     {
         errprint("%s error: invalid domid\n", __FUNCTION__);
         return VMI_FAILURE;
@@ -517,7 +541,7 @@ status_t process_guest_requested_event(vmi_instance_t vmi,
         return VMI_FAILURE;
     }
 
-    vmi->guest_requested_event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
+    vmi->guest_requested_event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
     vmi->guest_requested_event->vcpu_id = req->vcpu_id;
 
     vmi->event_callback = 1;
@@ -540,7 +564,7 @@ status_t process_cpuid_event(vmi_instance_t vmi,
         errprint("%s error: invalid xc_interface handle\n", __FUNCTION__);
         return VMI_FAILURE;
     }
-    if ( dom == VMI_INVALID_DOMID )
+    if ( dom == (domid_t)VMI_INVALID_DOMID )
     {
         errprint("%s error: invalid domid\n", __FUNCTION__);
         return VMI_FAILURE;
@@ -551,7 +575,7 @@ status_t process_cpuid_event(vmi_instance_t vmi,
         return VMI_FAILURE;
     }
 
-    vmi->cpuid_event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
+    vmi->cpuid_event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
     vmi->cpuid_event->vcpu_id = req->vcpu_id;
     vmi->cpuid_event->cpuid_event.insn_length = req->u.cpuid.insn_length;
 
@@ -580,7 +604,7 @@ status_t process_debug_event(vmi_instance_t vmi,
         errprint("%s error: invalid xc_interface handle\n", __FUNCTION__);
         return VMI_FAILURE;
     }
-    if ( dom == VMI_INVALID_DOMID )
+    if ( dom == (domid_t)VMI_INVALID_DOMID )
     {
         errprint("%s error: invalid domid\n", __FUNCTION__);
         return VMI_FAILURE;
@@ -591,7 +615,7 @@ status_t process_debug_event(vmi_instance_t vmi,
         return VMI_FAILURE;
     }
 
-    vmi->debug_event->regs.x86 = (x86_registers_t *)&req->data.regs.x86;
+    vmi->debug_event->x86_regs = (x86_registers_t *)&req->data.regs.x86;
     vmi->debug_event->vcpu_id = req->vcpu_id;
     vmi->debug_event->debug_event.reinject = -1;
     vmi->debug_event->debug_event.gla = req->data.regs.x86.rip;
@@ -673,6 +697,9 @@ void xen_events_destroy_new(vmi_instance_t vmi)
     rc = xen->libxcw.xc_monitor_write_ctrlreg(xch, dom, VM_EVENT_X86_CR4, false, false, false);
     rc = xen->libxcw.xc_monitor_write_ctrlreg(xch, dom, VM_EVENT_X86_XCR0, false, false, false);
     rc = xen->libxcw.xc_monitor_software_breakpoint(xch, dom, false);
+    xen_set_guest_requested_event(vmi, 0);
+    xen_set_cpuid_event(vmi, 0);
+    xen_set_debug_event(vmi, 0);
 
     if ( xe->vm_event.ring_page ) {
         xen_events_listen(vmi, 0);
@@ -704,10 +731,7 @@ status_t xen_init_events_new(vmi_instance_t vmi)
     xen_events_t * xe = NULL;
     xen_instance_t *xen = xen_get_instance(vmi);
     xc_interface * xch = xen_get_xchandle(vmi);
-    xc_domaininfo_t dom_info = {0};
     domid_t dom = xen_get_domainid(vmi);
-    unsigned long ring_pfn = 0;
-    unsigned long mmap_pfn = 0;
     int rc;
 
     if ( !xch ) {
@@ -834,6 +858,9 @@ status_t xen_set_reg_access(vmi_instance_t vmi, reg_event_t *event)
                 goto done;
             }
             break;
+        default:
+            errprint("%s error: no system support for event type\n", __FUNCTION__);
+            goto done;
     }
 
     switch ( event->in_access )
@@ -887,6 +914,7 @@ status_t xen_set_reg_access(vmi_instance_t vmi, reg_event_t *event)
                 goto done;
 
             xe->vm_event.monitor_cr4_on = enable;
+            break;
         case XCR0:
             if ( enable == xe->vm_event.monitor_xcr0_on )
                 goto done;
@@ -919,7 +947,7 @@ done:
     return VMI_FAILURE;
 }
 
-status_t xen_set_mem_access(vmi_instance_t vmi, mem_access_event_t *event,
+status_t xen_set_mem_access(vmi_instance_t vmi, addr_t gpfn,
                             vmi_mem_access_t page_access_flag, uint16_t altp2m_idx)
 {
     int rc;
@@ -941,59 +969,19 @@ status_t xen_set_mem_access(vmi_instance_t vmi, mem_access_event_t *event,
         errprint("%s error: invalid domid\n", __FUNCTION__);
         return VMI_FAILURE;
     }
-    if ( page_access_flag >= __VMI_MEMACCESS_MAX || page_access_flag <= VMI_MEMACCESS_INVALID ) {
-        errprint("%s error: invalid memaccess setting requested\n", __FUNCTION__);
+    if ( VMI_FAILURE == convert_vmi_flags_to_xenmem(page_access_flag, &access) )
         return VMI_FAILURE;
-    }
-
-    /*
-     * Setting a page write-only or write-execute in EPT triggers and EPT misconfiguration error
-     * which is unhandled by Xen (at least up to 4.3) and instantly crashes the domain on the first trigger.
-     *
-     * See Intel® 64 and IA-32 Architectures Software Developer’s Manual
-     * 8.2.3.1 EPT Misconfigurations
-     * AN EPT misconfiguration occurs if any of the following is identified while translating a guest-physical address:
-     * * The value of bits 2:0 of an EPT paging-structure entry is either 010b (write-only) or 110b (write/execute).
-     */
-    if(page_access_flag == VMI_MEMACCESS_R || page_access_flag == VMI_MEMACCESS_RX) {
-        errprint("%s error: can't set requested memory access, unsupported by EPT.\n", __FUNCTION__);
-        return VMI_FAILURE;
-    }
-
-    addr_t page_key = event->physical_address >> 12;
-
-    uint64_t npages = page_key + event->npages > xen->max_gpfn
-        ? xen->max_gpfn - page_key: event->npages;
-
-    // Convert betwen vmi_mem_access_t and mem_access_t
-    // Xen does them backwards....
-    static const xenmem_access_t memaccess_conversion[] = {
-        [VMI_MEMACCESS_RWX] = XENMEM_access_n,
-        [VMI_MEMACCESS_WX] = XENMEM_access_r,
-        [VMI_MEMACCESS_RX] = XENMEM_access_w,
-        [VMI_MEMACCESS_X] = XENMEM_access_rw,
-        [VMI_MEMACCESS_W] = XENMEM_access_rx,
-        [VMI_MEMACCESS_R] = XENMEM_access_wx,
-        [VMI_MEMACCESS_N] = XENMEM_access_rwx,
-        [VMI_MEMACCESS_W2X] = XENMEM_access_rx2rw,
-        [VMI_MEMACCESS_RWX2N] = XENMEM_access_n2rwx,
-    };
-
-    access = memaccess_conversion[page_access_flag];
-
-    dbprint(VMI_DEBUG_XEN, "--Setting memaccess for domain %"PRIu64" on physical address: %"PRIu64" npages: %"PRIu64"\n",
-        dom, event->physical_address, npages);
 
     if ( !altp2m_idx )
-        rc = xen->libxcw.xc_set_mem_access(xch, dom, access, page_key, npages);
+        rc = xen->libxcw.xc_set_mem_access(xch, dom, access, gpfn, 1); // 1 page at a time
     else
-        rc = xen->libxcw.xc_altp2m_set_mem_access(xch, dom, altp2m_idx, page_key, access);
+        rc = xen->libxcw.xc_altp2m_set_mem_access(xch, dom, altp2m_idx, gpfn, access);
 
     if(rc) {
         errprint("xc_hvm_set_mem_access failed with code: %d\n", rc);
         return VMI_FAILURE;
     }
-    dbprint(VMI_DEBUG_XEN, "--Done Setting memaccess on physical address: %"PRIu64"\n", event->physical_address);
+    dbprint(VMI_DEBUG_XEN, "--Done Setting memaccess on GPFN: %"PRIu64"\n", gpfn);
     return VMI_SUCCESS;
 }
 
@@ -1062,7 +1050,7 @@ status_t xen_start_single_step(vmi_instance_t vmi, single_step_event_t *event)
         return VMI_FAILURE;
     }
 
-    dbprint(VMI_DEBUG_XEN, "--Starting single step on domain %"PRIu64"\n", dom);
+    dbprint(VMI_DEBUG_XEN, "--Starting single step on domain %"PRIu16"\n", dom);
 
     if ( !xe->vm_event.monitor_singlestep_on )
     {
@@ -1110,7 +1098,6 @@ status_t xen_start_single_step(vmi_instance_t vmi, single_step_event_t *event)
 
 status_t xen_stop_single_step(vmi_instance_t vmi, uint32_t vcpu)
 {
-    domid_t dom = xen_get_domainid(vmi);
     status_t ret = VMI_FAILURE;
 
     dbprint(VMI_DEBUG_XEN, "--Removing MTF flag from vcpu %u\n", vcpu);
@@ -1127,7 +1114,7 @@ status_t xen_shutdown_single_step(vmi_instance_t vmi) {
     int rc = -1;
     uint32_t i=0;
 
-    dbprint(VMI_DEBUG_XEN, "--Shutting down single step on domain %"PRIu64"\n", dom);
+    dbprint(VMI_DEBUG_XEN, "--Shutting down single step on domain %"PRIu16"\n", dom);
 
     for(;i<vmi->num_vcpus; i++) {
         xen_stop_single_step(vmi, i);
@@ -1155,6 +1142,9 @@ status_t xen_set_guest_requested_event(vmi_instance_t vmi, bool enabled) {
     if ( xen->major_version != 4 || xen->minor_version < 5 )
         return VMI_FAILURE;
 
+    if ( !enabled && !vmi->guest_requested_event )
+        return VMI_SUCCESS;
+
     rc  = xen->libxcw.xc_monitor_guest_request(xen_get_xchandle(vmi),
                                                xen_get_domainid(vmi),
                                                enabled, 1);
@@ -1175,6 +1165,9 @@ status_t xen_set_debug_event(vmi_instance_t vmi, bool enabled) {
     if ( xen->major_version != 4 || xen->minor_version < 8 )
         return VMI_FAILURE;
 
+    if ( !enabled && !vmi->debug_event )
+        return VMI_SUCCESS;
+
     rc = xen->libxcw.xc_monitor_debug_exceptions(xen_get_xchandle(vmi),
                                                  xen_get_domainid(vmi),
                                                  enabled, 1);
@@ -1194,6 +1187,9 @@ status_t xen_set_cpuid_event(vmi_instance_t vmi, bool enabled) {
 
     if ( xen->major_version != 4 || xen->minor_version < 8 )
         return VMI_FAILURE;
+
+    if ( !enabled && !vmi->cpuid_event )
+        return VMI_SUCCESS;
 
     rc = xen->libxcw.xc_monitor_cpuid(xen_get_xchandle(vmi),
                                       xen_get_domainid(vmi),
@@ -1369,7 +1365,7 @@ status_t xen_events_listen(vmi_instance_t vmi, uint32_t timeout)
 
     if(!vmi->shutting_down && timeout > 0) {
         dbprint(VMI_DEBUG_XEN, "--Waiting for xen events...(%"PRIu32" ms)\n", timeout);
-        rc = wait_for_event_or_timeout(xch, xe->vm_event.xce_handle, timeout);
+        rc = wait_for_event_or_timeout(xe->vm_event.xce_handle, timeout);
         if ( rc < -1 ) {
             errprint("Error while waiting for event.\n");
             return VMI_FAILURE;
@@ -1379,27 +1375,26 @@ status_t xen_events_listen(vmi_instance_t vmi, uint32_t timeout)
     vrc = process_requests(vmi, &req, &rsp);
 
     /*
-     * The only way to gracefully handle vmi_clear_event requests
+     * The only way to gracefully handle vmi_swap_events and vmi_clear_event requests
      * that were issued in a callback is to ensure no more requests
      * are in the ringpage. We do this by pausing the domain (all vCPUs)
      * and process all reamining events on the ring. Once no more requests
      * are on the ring we can remove the events.
      */
-    if ( g_hash_table_size(vmi->clear_events) ) {
+    if ( vmi->swap_events || (vmi->clear_events && g_hash_table_size(vmi->clear_events)) ) {
         vmi_pause_vm(vmi); // Pause all vCPUs
+
         vrc = process_requests(vmi, &req, &rsp);
 
-        GHashTableIter i;
-        vmi_event_t **key = NULL;
-        vmi_event_free_t cb;
-
-        ghashtable_foreach(vmi->clear_events, i, &key, &cb) {
-            vmi_clear_event(vmi, *key, cb);
+        GSList *loop = vmi->swap_events;
+        while(loop) {
+            swap_wrapper_t *swap_wrapper = loop->data;
+            swap_events(vmi, swap_wrapper->swap_from, swap_wrapper->swap_to,
+                        swap_wrapper->free_routine);
+            loop = loop->next;
         }
 
-        g_hash_table_destroy(vmi->clear_events);
-        vmi->clear_events =
-            g_hash_table_new_full(g_int64_hash, g_int64_equal, free, NULL);
+        g_hash_table_foreach_steal(vmi->clear_events, clear_events, vmi);
 
         vmi_resume_vm(vmi);
     }

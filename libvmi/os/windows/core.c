@@ -88,7 +88,6 @@ get_ntoskrnl_base(
     vmi_instance_t vmi,
     addr_t page_paddr)
 {
-    uint8_t page[VMI_PS_4KB];
     addr_t ret = 0;
     access_context_t ctx = {
         .translate_mechanism = VMI_TM_NONE,
@@ -531,9 +530,47 @@ void windows_read_config_ghashtable_entries(char* key, gpointer value,
 }
 
 static status_t
+get_kpgd_from_rekall_profile(vmi_instance_t vmi)
+{
+    status_t ret = VMI_FAILURE;
+    windows_instance_t windows = vmi->os_data;
+    addr_t sysproc_pointer_rva = 0;
+    addr_t sysproc_pdbase_addr = 0;
+
+    /* The kernel base and the pdbase offset should have already been found
+     * and vmi->kpgd should be holding a CR3 value */
+    if( !windows->rekall_profile || !windows->ntoskrnl || !windows->pdbase_offset || !vmi->kpgd )
+        return ret;
+
+    dbprint(VMI_DEBUG_MISC, "**Getting kernel page directory from Rekall profile\n");
+
+    if ( !windows->sysproc )
+    {
+        ret = rekall_profile_symbol_to_rva(windows->rekall_profile, "PsInitialSystemProcess", NULL, &sysproc_pointer_rva);
+        if ( VMI_FAILURE == ret )
+            return ret;
+
+        ret = vmi_read_addr_pa(vmi, windows->ntoskrnl + sysproc_pointer_rva, &windows->sysproc);
+        if ( VMI_FAILURE == ret )
+            return ret;
+
+        dbprint(VMI_DEBUG_MISC, "**Found PsInitialSystemProcess at 0x%lx\n", windows->sysproc);
+    }
+
+    sysproc_pdbase_addr = vmi_pagetable_lookup(vmi, vmi->kpgd, windows->sysproc + windows->pdbase_offset);
+    if ( !sysproc_pdbase_addr )
+        return VMI_FAILURE;
+
+    ret = vmi_read_addr_pa(vmi, sysproc_pdbase_addr, &vmi->kpgd);
+    if ( ret == VMI_SUCCESS && vmi->kpgd )
+        return VMI_SUCCESS;
+
+    return VMI_FAILURE;
+}
+
+static status_t
 init_from_rekall_profile(vmi_instance_t vmi)
 {
-
     status_t ret = VMI_FAILURE;
     windows_instance_t windows = vmi->os_data;
     dbprint(VMI_DEBUG_MISC, "**Trying to init from Rekall profile\n");
@@ -559,7 +596,7 @@ init_from_rekall_profile(vmi_instance_t vmi)
         };
 
         if (VMI_SUCCESS == rekall_profile_symbol_to_rva(windows->rekall_profile, "KiInitialPCR", NULL, &kpcr_rva)) {
-            if ( kpcr <= kpcr_rva || vmi->page_mode == VMI_PM_IA32E && kpcr < 0xffff800000000000 ) {
+            if ( kpcr <= kpcr_rva || (vmi->page_mode == VMI_PM_IA32E && kpcr < 0xffff800000000000) ) {
                 dbprint(VMI_DEBUG_MISC, "**vCPU0 doesn't seem to have KiInitialPCR mapped, can't init from Rekall profile.\n");
                 goto done;
             }
@@ -572,10 +609,16 @@ init_from_rekall_profile(vmi_instance_t vmi)
             // at this VA (XP/Vista) and the KPCR trick [1] is still valid.
             // [1] http://moyix.blogspot.de/2008/04/finding-kernel-global-variables-in.html
             addr_t kdvb = 0, kdvb_offset = 0, kernbase_offset = 0;
-            rekall_profile_symbol_to_rva(windows->rekall_profile, "_KPCR", "KdVersionBlock", &kdvb_offset);
-            rekall_profile_symbol_to_rva(windows->rekall_profile, "_DBGKD_GET_VERSION64", "KernBase", &kernbase_offset);
-            vmi_read_addr_va(vmi, kpcr+kdvb_offset, 0, &kdvb);
-            vmi_read_addr_va(vmi, kdvb+kernbase_offset, 0, &windows->ntoskrnl_va);
+
+            if ( VMI_FAILURE == rekall_profile_symbol_to_rva(windows->rekall_profile, "_KPCR", "KdVersionBlock", &kdvb_offset) )
+                goto done;
+            if ( VMI_FAILURE == rekall_profile_symbol_to_rva(windows->rekall_profile, "_DBGKD_GET_VERSION64", "KernBase", &kernbase_offset) )
+                goto done;
+            if ( VMI_FAILURE == vmi_read_addr_va(vmi, kpcr+kdvb_offset, 0, &kdvb) )
+                goto done;
+            if ( VMI_FAILURE == vmi_read_addr_va(vmi, kdvb+kernbase_offset, 0, &windows->ntoskrnl_va) )
+                goto done;
+
             windows->ntoskrnl = vmi_translate_kv2p(vmi, windows->ntoskrnl_va);
         } else {
             goto done;
@@ -601,17 +644,21 @@ init_from_rekall_profile(vmi_instance_t vmi)
 
         // get KdVersionBlock/"_DBGKD_GET_VERSION64"->KernBase
         addr_t kdvb = 0, kernbase_offset = 0;
-        rekall_profile_symbol_to_rva(windows->rekall_profile, "KdVersionBlock", NULL, &kdvb);
-        rekall_profile_symbol_to_rva(windows->rekall_profile, "_DBGKD_GET_VERSION64", "KernBase", &kernbase_offset);
+        if ( VMI_FAILURE == rekall_profile_symbol_to_rva(windows->rekall_profile, "KdVersionBlock", NULL, &kdvb) )
+            goto done;
+        if ( VMI_FAILURE == rekall_profile_symbol_to_rva(windows->rekall_profile, "_DBGKD_GET_VERSION64", "KernBase", &kernbase_offset) )
+            goto done;
 
         dbprint(VMI_DEBUG_MISC, "**KdVersionBlock RVA 0x%lx. KernBase RVA: 0x%lx\n", kdvb, kernbase_offset);
         dbprint(VMI_DEBUG_MISC, "**KernBase PA=0x%"PRIx64"\n", windows->ntoskrnl);
 
         if (windows->ntoskrnl && kdvb && kernbase_offset) {
-            vmi_read_addr_pa(vmi, windows->ntoskrnl + kdvb + kernbase_offset, &windows->ntoskrnl_va);
+            if ( VMI_FAILURE == vmi_read_addr_pa(vmi, windows->ntoskrnl + kdvb + kernbase_offset, &windows->ntoskrnl_va) )
+                goto done;
 
             if(!windows->ntoskrnl_va) {
-                vmi_read_32_pa(vmi, windows->ntoskrnl + kdvb + kernbase_offset, (uint32_t*)&windows->ntoskrnl_va);
+                if ( VMI_FAILURE == vmi_read_32_pa(vmi, windows->ntoskrnl + kdvb + kernbase_offset, (uint32_t*)&windows->ntoskrnl_va) )
+                    goto done;
             }
 
             if(!windows->ntoskrnl_va) {
@@ -755,6 +802,12 @@ windows_init(
     }
 
     if (VMI_SUCCESS == real_kpgd_found) {
+        status = VMI_SUCCESS;
+        goto done;
+    }
+
+    if ( VMI_SUCCESS == get_kpgd_from_rekall_profile(vmi) ) {
+        dbprint(VMI_DEBUG_MISC, "--kpgd from rekall profile success\n");
         status = VMI_SUCCESS;
         goto done;
     }
