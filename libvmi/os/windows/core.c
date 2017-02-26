@@ -414,6 +414,11 @@ error_exit:
     return VMI_FAILURE;
 }
 
+status_t windows_get_kernel_struct_offset(vmi_instance_t vmi, const char* symbol, const char* member, addr_t *addr){
+    windows_instance_t windows = vmi->os_data;
+    return rekall_profile_symbol_to_rva(windows->rekall_profile,symbol,member,addr);
+}
+
 uint64_t windows_get_offset(vmi_instance_t vmi, const char* offset_name) {
     const size_t max_length = 100;
     windows_instance_t windows = vmi->os_data;
@@ -749,19 +754,25 @@ windows_init(
 
     if (vmi->os_data != NULL) {
         errprint("VMI_ERROR: os data already initialized, resetting\n");
+        bzero(vmi->os_data, sizeof(struct windows_instance));
     } else {
-        vmi->os_data = safe_malloc(sizeof(struct windows_instance));
+        vmi->os_data = g_malloc0(sizeof(struct windows_instance));
+        if ( !vmi->os_data )
+            return VMI_FAILURE;
     }
 
-    bzero(vmi->os_data, sizeof(struct windows_instance));
     windows = vmi->os_data;
     windows->version = VMI_OS_WINDOWS_UNKNOWN;
 
     g_hash_table_foreach(vmi->config, (GHFunc)windows_read_config_ghashtable_entries, vmi);
 
     /* Need to provide this functions so that find_page_mode will work */
-    os_interface = safe_malloc(sizeof(struct os_interface));
+    os_interface = g_malloc0(sizeof(struct os_interface));
+    if ( !os_interface )
+        goto error_exit;
+
     bzero(os_interface, sizeof(struct os_interface));
+    os_interface->os_get_kernel_struct_offset = windows_get_kernel_struct_offset;
     os_interface->os_get_offset = windows_get_offset;
     os_interface->os_pid_to_pgd = windows_pid_to_pgd;
     os_interface->os_pgd_to_pid = windows_pgd_to_pid;
@@ -852,8 +863,7 @@ status_t windows_teardown(vmi_instance_t vmi) {
     }
 
     g_free(windows->rekall_profile);
-
-    free(vmi->os_data);
+    g_free(vmi->os_data);
     vmi->os_data = NULL;
 
 done:

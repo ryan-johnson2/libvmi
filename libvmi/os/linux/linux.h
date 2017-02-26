@@ -36,12 +36,17 @@ struct linux_instance {
     addr_t pgd_offset; /**< mm_struct->pgd */
 
     addr_t name_offset; /**< task_struct->comm */
+
+    addr_t kaslr_offset; /**< offset generated at boot time for KASLR */
 };
 typedef struct linux_instance *linux_instance_t;
 
 status_t linux_init(vmi_instance_t instance);
 
 uint64_t linux_get_offset(vmi_instance_t vmi, const char* offset_name);
+
+status_t linux_get_kernel_struct_offset(vmi_instance_t vmi, 
+        const char*  symbol, const char* member, addr_t *addr);
 
 status_t linux_symbol_to_address(vmi_instance_t instance,
         const char *symbol, addr_t *__unused, addr_t *address);

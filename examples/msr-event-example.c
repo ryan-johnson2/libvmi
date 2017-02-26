@@ -34,7 +34,7 @@
 vmi_event_t msr_event;
 
 event_response_t msr_write_cb(vmi_instance_t vmi, vmi_event_t *event) {
-    printf("MSR write happened: MSR=%lx Value=%lx\n", event->reg_event.context, event->reg_event.value);
+    printf("MSR write happened: MSR=%x Value=%lx\n", event->reg_event.msr, event->reg_event.value);
     return 0;
 }
 
@@ -75,6 +75,7 @@ int main (int argc, char **argv) {
 
     /* Register event to track any writes to a MSR. */
     memset(&msr_event, 0, sizeof(vmi_event_t));
+    msr_event.version = VMI_EVENTS_VERSION;
     msr_event.type = VMI_EVENT_REGISTER;
     msr_event.reg_event.reg = MSR_ALL;
     msr_event.reg_event.in_access = VMI_REGACCESS_W;

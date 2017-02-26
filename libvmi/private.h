@@ -166,6 +166,8 @@ struct vmi_instance {
 
     GHashTable *reg_events; /**< reg event to functions mapping (key: reg) */
 
+    GHashTable *msr_events; /**< reg event to functions mapping (key: msr index) */
+
     GHashTable *ss_events; /**< single step event to functions mapping (key: vcpu_id) */
 
     GSList *step_events; /**< events to be re-registered after single-stepping them */
@@ -264,6 +266,19 @@ addr_t canonical_addr(addr_t va) {
 #else
 #  define UNUSED_FUNCTION(x) UNUSED_ ## x
 #endif
+
+static inline gboolean
+g_hash_table_insert_compat(GHashTable *table,
+                           gpointer key,
+                           gpointer value)
+{
+#if GLIB_VERSION <= 238
+    g_hash_table_insert(table, key, value);
+    return true;
+#else
+    return g_hash_table_insert(table, key, value);
+#endif
+}
 
 /*-------------------------------------
  * accessors.c

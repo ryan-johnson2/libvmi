@@ -109,7 +109,10 @@ linux_system_map_symbol_to_address(
         goto done;
     }
 
-    row = safe_malloc(MAX_ROW_LENGTH);
+    row = g_malloc0(MAX_ROW_LENGTH);
+    if ( !row )
+        goto done;
+
     if ((f = fopen(linux_instance->sysmap, "r")) == NULL) {
         fprintf(stderr,
                 "ERROR: could not find System.map file after checking:\n");
@@ -172,7 +175,10 @@ char* linux_system_map_address_to_symbol(
         goto done;
     }
 
-    row = safe_malloc(MAX_ROW_LENGTH);
+    row = g_malloc0(MAX_ROW_LENGTH);
+    if ( !row )
+        goto done;
+
     if ((f = fopen(linux_instance->sysmap, "r")) == NULL) {
         fprintf(stderr,
                 "ERROR: could not find System.map file after checking:\n");
@@ -236,6 +242,9 @@ linux_symbol_to_address(
         ret = rekall_profile_symbol_to_rva(
                 linux_instance->rekall_profile,
                 symbol, NULL, address);
+
+    if ( VMI_SUCCESS == ret )
+        *address += linux_instance->kaslr_offset;
 
 done:
     return ret;

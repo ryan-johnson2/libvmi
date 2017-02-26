@@ -158,7 +158,6 @@ typedef enum page_size {
 } page_size_t;
 
 typedef uint64_t reg_t;
-typedef reg_t registers_t;
 
 /**
  * The following definitions are used where the API defines
@@ -265,6 +264,46 @@ typedef reg_t registers_t;
 #define MSR_SYSCALL_MASK 73
 #define MSR_EFER         74
 #define MSR_TSC_AUX      75
+
+#define MSR_STAR                    119
+#define MSR_SHADOW_GS_BASE          120
+#define MSR_MTRRfix64K_00000        121
+#define MSR_MTRRfix16K_80000        122
+#define MSR_MTRRfix16K_A0000        123
+#define MSR_MTRRfix4K_C0000         124
+#define MSR_MTRRfix4K_C8000         125
+#define MSR_MTRRfix4K_D0000         126
+#define MSR_MTRRfix4K_D8000         127
+#define MSR_MTRRfix4K_E0000         128
+#define MSR_MTRRfix4K_E8000         129
+#define MSR_MTRRfix4K_F0000         130
+#define MSR_MTRRfix4K_F8000         131
+#define MSR_MTRRdefType             132
+#define MSR_IA32_MC0_CTL            133
+#define MSR_IA32_MC0_STATUS         134
+#define MSR_IA32_MC0_ADDR           135
+#define MSR_IA32_MC0_MISC           136
+#define MSR_IA32_MC1_CTL            137
+#define MSR_IA32_MC0_CTL2           138
+#define MSR_AMD_PATCHLEVEL          139
+#define MSR_AMD64_TSC_RATIO         140
+#define MSR_IA32_P5_MC_ADDR         141
+#define MSR_IA32_P5_MC_TYPE         142
+#define MSR_IA32_TSC                143
+#define MSR_IA32_PLATFORM_ID        144
+#define MSR_IA32_EBL_CR_POWERON     145
+#define MSR_IA32_EBC_FREQUENCY_ID   146
+#define MSR_IA32_FEATURE_CONTROL    147
+#define MSR_IA32_SYSENTER_CS        148
+#define MSR_IA32_SYSENTER_ESP       149
+#define MSR_IA32_SYSENTER_EIP       150
+#define MSR_IA32_MISC_ENABLE        151
+#define MSR_HYPERVISOR              152
+
+/**
+ * Special generic case for specifying arbitrary MSRs not formally listed above.
+ */
+#define MSR_UNDEFINED               153
 
 /**
  * Special generic case for handling MSRs, given their understandably
@@ -375,6 +414,51 @@ typedef reg_t registers_t;
 #define PC64        PC
 #define SPSR_EL1    SPSR_SVC
 #define TCR_EL1     TTBCR
+
+/*
+ * Commonly used x86 registers
+ */
+typedef struct x86_regs {
+    uint64_t rax;
+    uint64_t rcx;
+    uint64_t rdx;
+    uint64_t rbx;
+    uint64_t rsp;
+    uint64_t rbp;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t r8;
+    uint64_t r9;
+    uint64_t r10;
+    uint64_t r11;
+    uint64_t r12;
+    uint64_t r13;
+    uint64_t r14;
+    uint64_t r15;
+    uint64_t rflags;
+    uint64_t dr7;
+    uint64_t rip;
+    uint64_t cr0;
+    uint64_t cr2;
+    uint64_t cr3;
+    uint64_t cr4;
+    uint64_t sysenter_cs;
+    uint64_t sysenter_esp;
+    uint64_t sysenter_eip;
+    uint64_t msr_efer;
+    uint64_t msr_star;
+    uint64_t msr_lstar;
+    uint64_t fs_base;
+    uint64_t gs_base;
+    uint32_t cs_arbytes;
+    uint32_t _pad;
+} x86_registers_t;
+
+typedef struct registers {
+    union {
+        x86_registers_t x86;
+    };
+} registers_t;
 
 /**
  * typedef for forward compatibility with 64-bit guests
@@ -628,6 +712,15 @@ status_t vmi_destroy(
  * @return The architecture of the library
  */
 vmi_arch_t vmi_get_library_arch();
+
+/**
+ * Get full path of associated rekall profile
+ *
+ * @param[in] vmi LibVMI instance
+ * @return Full path of the rekall profile
+ */
+const char *vmi_get_rekall_path(
+  vmi_instance_t vmi);
 
 /*---------------------------------------------------------
  * Memory translation functions from memory.c
@@ -1728,7 +1821,22 @@ win_ver_t vmi_get_winver_manual(
  */
 uint64_t vmi_get_offset(
     vmi_instance_t vmi,
-    char *offset_name);
+    const char *offset_name);
+
+/**
+ * Get the memory offset associated with the given symbol and subsymbol in the struct
+ * @param[in] vmi LibVMI instance
+ * @param[in] struct_name String name for desired symbol
+ * @param[in] subsymbol String name for desired subsymbol
+ * @param[out] offset of subsymbol in struct (symbol)
+ *
+ * @return VMI_SUCCESS or VMI_FAILURE
+ */
+status_t vmi_get_kernel_struct_offset(
+    vmi_instance_t vmi,
+    const char* struct_name,
+    const char* member,
+    addr_t *addr);
 
 /**
  * Gets the memory size of the guest or file that LibVMI is currently
@@ -1792,15 +1900,34 @@ unsigned int vmi_get_num_vcpus (
  */
 status_t vmi_get_vcpureg(
     vmi_instance_t vmi,
-    reg_t *value,
-    registers_t reg,
+    uint64_t *value,
+    reg_t reg,
+    unsigned long vcpu);
+
+/**
+ * Gets the current value of VCPU registers.  This currently only
+ * supports x86 registers.  When LibVMI is accessing a raw
+ * memory file or KVM, this function will fail.
+ *
+ * @param[in] vmi LibVMI instance
+ * @param[out] regs The register struct to be filled
+ * @param[in] vcpu The index of the VCPU to access, use 0 for single VCPU systems
+ * @return VMI_SUCCESS or VMI_FAILURE
+ */
+status_t vmi_get_vcpuregs(
+    vmi_instance_t vmi,
+    registers_t *regs,
     unsigned long vcpu);
 
 /**
  * Sets the current value of a VCPU register.  This currently only
  * supports control registers.  When LibVMI is accessing a raw
  * memory file, this function will fail. Operating upon an unpaused
- * VM with this function is likely to have unexpected results.
+ * vCPU with this function is likely to have unexpected results.
+ *
+ * On Xen HVM VMs the entire domain must be paused. Using this function in an event
+ * callback where only the vCPU is paused will have unexpected results as this
+ * function is not multi-vCPU safe.
  *
  * @param[in] vmi LibVMI instance
  * @param[in] value Value to assign to the register
@@ -1810,8 +1937,26 @@ status_t vmi_get_vcpureg(
  */
 status_t vmi_set_vcpureg(
     vmi_instance_t vmi,
-    reg_t value,
-    registers_t reg,
+    uint64_t value,
+    reg_t reg,
+    unsigned long vcpu);
+
+/**
+ * Sets the vCPU registers to the ones passed in the struct. It is important to have
+ * a valid value in all registers when calling this function, so the user likely
+ * wants to call vmi_get_vcpuregs before calling this function.
+ * When LibVMI is accessing a raw memory file or KVM, this function will fail.
+ * Operating upon an unpaused VM with this function is likely to have unexpected
+ * results.
+ *
+ * @param[in] vmi LibVMI instance
+ * @param[regs] regs The register struct holding the values to be set
+ * @param[in] vcpu The index of the VCPU to access, use 0 for single VCPU systems
+ * @return VMI_SUCCESS or VMI_FAILURE
+ */
+status_t vmi_set_vcpuregs(
+    vmi_instance_t vmi,
+    registers_t *regs,
     unsigned long vcpu);
 
 /**
@@ -1840,9 +1985,11 @@ status_t vmi_resume_vm(
  * the cache is incorrect, or out of date.
  *
  * @param[in] vmi LibVMI instance
+ * @param[in] dtb The process address space to flush, or ~0ull for all.
  */
 void vmi_v2pcache_flush(
-    vmi_instance_t vmi);
+    vmi_instance_t vmi,
+    addr_t dtb);
 
 /**
  * Adds one entry to LibVMI's internal virtual to physical address

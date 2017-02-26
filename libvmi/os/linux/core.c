@@ -221,6 +221,81 @@ static status_t init_from_rekall_profile(vmi_instance_t vmi) {
 done: return ret;
 }
 
+static status_t init_task_kaslr_test(vmi_instance_t vmi, addr_t page_vaddr) {
+    status_t ret = VMI_FAILURE;
+    uint32_t pid;
+    addr_t init_task = page_vaddr + (vmi->init_task & VMI_BIT_MASK(0,11));
+    linux_instance_t linux_instance = vmi->os_data;
+    access_context_t ctx = {
+        .translate_mechanism = VMI_TM_PROCESS_DTB,
+        .dtb = vmi->kpgd
+    };
+
+    ctx.addr = init_task + linux_instance->pid_offset;
+    if ( VMI_FAILURE == vmi_read_32(vmi, &ctx, &pid) )
+        return ret;
+
+    if ( pid )
+        return ret;
+
+    ctx.addr = init_task + linux_instance->name_offset;
+    char* init_task_name = vmi_read_str(vmi, &ctx);
+
+    if ( init_task_name && !strncmp("swapper", init_task_name, 7) )
+        ret = VMI_SUCCESS;
+
+    free(init_task_name);
+    return ret;
+}
+
+status_t init_kaslr(vmi_instance_t vmi) {
+    /*
+     * Let's check if we can translate init_task first as is.
+     */
+    uint32_t test;
+    access_context_t ctx = {
+        .translate_mechanism = VMI_TM_PROCESS_DTB,
+        .dtb = vmi->kpgd,
+        .addr = vmi->init_task
+    };
+
+    if ( VMI_SUCCESS == vmi_read_32(vmi, &ctx, &test) )
+        return VMI_SUCCESS;
+
+    status_t ret = VMI_FAILURE;
+    linux_instance_t linux_instance = vmi->os_data;
+    GSList *loop, *pages = vmi_get_va_pages(vmi, vmi->kpgd);
+    loop = pages;
+    while (loop) {
+        page_info_t *info = loop->data;
+
+        if ( !linux_instance->kaslr_offset ) {
+            switch(vmi->page_mode) {
+                case VMI_PM_AARCH64:
+                case VMI_PM_IA32E:
+                    if ( VMI_GET_BIT(info->vaddr, 47) )
+                        ret = init_task_kaslr_test(vmi, info->vaddr);
+                    break;
+                default:
+                    ret = init_task_kaslr_test(vmi, info->vaddr);
+                    break;
+            };
+
+            if ( VMI_SUCCESS == ret ) {
+                linux_instance->kaslr_offset = info->vaddr - (vmi->init_task & ~VMI_BIT_MASK(0,11));
+                vmi->init_task += linux_instance->kaslr_offset;
+                dbprint(VMI_DEBUG_MISC, "**calculated KASLR offset: 0x%"PRIx64"\n", linux_instance->kaslr_offset);
+            }
+        }
+
+        g_free(info);
+        loop = loop->next;
+    }
+
+    g_slist_free(pages);
+    return ret;
+}
+
 status_t linux_init(vmi_instance_t vmi) {
 
     status_t rc;
@@ -233,11 +308,13 @@ status_t linux_init(vmi_instance_t vmi) {
 
     if (vmi->os_data != NULL) {
         errprint("os data already initialized, reinitializing\n");
-        free(vmi->os_data);
+        g_free(vmi->os_data);
     }
 
-    vmi->os_data = safe_malloc(sizeof(struct linux_instance));
-    bzero(vmi->os_data, sizeof(struct linux_instance));
+    vmi->os_data = g_malloc0(sizeof(struct linux_instance));
+    if ( !vmi->os_data )
+        return VMI_FAILURE;
+
     linux_instance_t linux_instance = vmi->os_data;
 
     g_hash_table_foreach(vmi->config, (GHFunc)linux_read_config_ghashtable_entries, vmi);
@@ -269,11 +346,20 @@ status_t linux_init(vmi_instance_t vmi) {
         if (VMI_FAILURE == linux_filemode_init(vmi))
             goto _exit;
 
+    if ( VMI_FAILURE == init_kaslr(vmi) ) {
+        dbprint(VMI_DEBUG_MISC, "**failed to determine KASLR offset\n");
+        goto _exit;
+    }
+
     dbprint(VMI_DEBUG_MISC, "**set vmi->kpgd (0x%.16"PRIx64").\n", vmi->kpgd);
 
-    os_interface = safe_malloc(sizeof(struct os_interface));
+    os_interface = g_malloc(sizeof(struct os_interface));
+    if ( !os_interface )
+        goto _exit;
+
     bzero(os_interface, sizeof(struct os_interface));
     os_interface->os_get_offset = linux_get_offset;
+    os_interface->os_get_kernel_struct_offset = linux_get_kernel_struct_offset;
     os_interface->os_pid_to_pgd = linux_pid_to_pgd;
     os_interface->os_pgd_to_pid = linux_pgd_to_pid;
     os_interface->os_ksym2v = linux_symbol_to_address;
@@ -287,7 +373,7 @@ status_t linux_init(vmi_instance_t vmi) {
     return VMI_SUCCESS;
 
     _exit:
-    free(vmi->os_data);
+    g_free(vmi->os_data);
     vmi->os_data = NULL;
     return VMI_FAILURE;
 }
@@ -351,6 +437,11 @@ void linux_read_config_ghashtable_entries(char* key, gpointer value,
     warnprint("Invalid offset %s given for Linux target\n", key);
 
     _done: return;
+}
+
+status_t linux_get_kernel_struct_offset(vmi_instance_t vmi, const char* symbol, const char* member, addr_t *addr){
+    linux_instance_t linux_instance = vmi->os_data;
+    return rekall_profile_symbol_to_rva(linux_instance->rekall_profile,symbol,member,addr);
 }
 
 uint64_t linux_get_offset(vmi_instance_t vmi, const char* offset_name) {

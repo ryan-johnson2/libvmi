@@ -132,13 +132,23 @@ vmi_get_winver_manual(
 uint64_t
 vmi_get_offset(
     vmi_instance_t vmi,
-    char *offset_name)
+    const char *offset_name)
 {
     if (vmi->os_interface == NULL || vmi->os_interface->os_get_offset == NULL ) {
         return 0;
     }
 
     return vmi->os_interface->os_get_offset(vmi, offset_name);
+}
+
+status_t
+vmi_get_kernel_struct_offset(
+    vmi_instance_t vmi,
+    const char* symbol,
+    const char* member,
+    addr_t *addr)
+{
+    return vmi->os_interface->os_get_kernel_struct_offset(vmi,symbol,member,addr);
 }
 
 uint64_t
@@ -165,21 +175,39 @@ vmi_get_num_vcpus(
 status_t
 vmi_get_vcpureg(
     vmi_instance_t vmi,
-    reg_t *value,
-    registers_t reg,
+    uint64_t *value,
+    reg_t reg,
     unsigned long vcpu)
 {
     return driver_get_vcpureg(vmi, value, reg, vcpu);
 }
 
 status_t
+vmi_get_vcpuregs(
+    vmi_instance_t vmi,
+    registers_t *regs,
+    unsigned long vcpu)
+{
+    return driver_get_vcpuregs(vmi, regs, vcpu);
+}
+
+status_t
 vmi_set_vcpureg(
     vmi_instance_t vmi,
-    reg_t value,
-    registers_t reg,
+    uint64_t value,
+    reg_t reg,
     unsigned long vcpu)
 {
     return driver_set_vcpureg(vmi, value, reg, vcpu);
+}
+
+status_t
+vmi_set_vcpuregs(
+    vmi_instance_t vmi,
+    registers_t *regs,
+    unsigned long vcpu)
+{
+    return driver_set_vcpuregs(vmi, regs, vcpu);
 }
 
 status_t
@@ -211,6 +239,21 @@ vmi_get_name(
     }
 }
 
+const char *
+vmi_get_rekall_path(
+    vmi_instance_t vmi){
+
+    switch(vmi_get_ostype(vmi))
+    {
+    case VMI_OS_LINUX:
+        return (const char*)((linux_instance_t)vmi->os_data)->rekall_profile;
+    case VMI_OS_WINDOWS:
+        return (const char*)((windows_instance_t)vmi->os_data)->rekall_profile;
+    default:
+        return NULL;
+    }
+}
+
 uint64_t
 vmi_get_vmid(
     vmi_instance_t vmi)
@@ -229,16 +272,16 @@ vmi_get_vmid(
 addr_t vmi_translate_ksym2v (vmi_instance_t vmi, const char *symbol)
 {
     status_t status = VMI_FAILURE;
-    addr_t base_vaddr = 0;
     addr_t address = 0;
 
-    if (VMI_FAILURE == sym_cache_get(vmi, base_vaddr, 0, symbol, &address)) {
+    if (VMI_FAILURE == sym_cache_get(vmi, 0, 0, symbol, &address)) {
 
         if (vmi->os_interface && vmi->os_interface->os_ksym2v) {
-            status = vmi->os_interface->os_ksym2v(vmi, symbol, &base_vaddr, &address);
+            addr_t _base_vaddr;
+            status = vmi->os_interface->os_ksym2v(vmi, symbol, &_base_vaddr, &address);
             if (status == VMI_SUCCESS) {
                 address = canonical_addr(address);
-                sym_cache_set(vmi, base_vaddr, 0, symbol, address);
+                sym_cache_set(vmi, 0, 0, symbol, address);
             }
         }
     }
